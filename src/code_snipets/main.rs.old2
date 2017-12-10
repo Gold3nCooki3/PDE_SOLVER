@@ -1,0 +1,259 @@
+extern crate ndarray;
+extern crate scoped_threadpool;
+use ndarray::prelude::*;
+use std::f64::consts;
+
+const MAX_ITERATION     : i32 = 200000;
+const METH_GAUSS_SEIDEL : i32 = 1;
+const METH_JACOBI 		: i32 = 2;
+const FUNC_F0			: i32 = 1;
+const FUNC_FPISIN		: i32 = 2;
+const TERM_PREC		    : i32 = 1;
+const TERM_ITER         : i32 = 2;
+const TOW_PI_SQARE      : f64 = consts::PI *  consts::PI * 2.0;
+const PI                : f64 = consts::PI;
+
+struct Options {
+    number          : i32,   /* Number of threads                              */
+    method          : i32,   /* Gauss Seidel or Jacobi method of iteration     */
+    interlines      : u32,   /* matrix size = interlines*8+9                   */
+    inf_func        : i32,   /* inference function                             */
+    termination     : i32,   /* termination condition                          */
+    term_iteration  : i32,   /* terminate if iteration number reached          */
+    term_precision  : f64,   /* terminate if precision reached                 */
+} 
+
+struct CalcArguments {
+    n               : usize,
+    num_matrices    : i32,
+    h               : f64,        
+}
+
+pub struct CalcResults {
+    m               : usize,
+    stat_iteration  : i32,
+    stat_precision  : f64,
+}
+
+fn calc_get_with_threadpool(options: &Options,  results: &mut CalcResults, arguments: &CalcArguments, matrix: &mut Array3<f64>){
+    use std::mem;
+    use std::sync::{Arc, Mutex};
+    use scoped_threadpool;
+    //use pond;
+    use std::time::Instant;
+
+    let mut fpisin      : f64 = 0.0;
+    let     h           : f64 = arguments.h;
+    let mut pih         : f64 = 0.0;
+    let mut matrix_in   : usize = 0;
+    let mut matrix_out  : usize = 1;
+    let mut term_iteration = options.term_iteration;
+
+    //For parallelization
+    let     processes : usize = if options.number as usize <= arguments.n { options.number as usize }else{arguments.n}; // number of processes /currently the main process is idle
+    let mut pool              = scoped_threadpool::Pool::new(processes as u32);
+    //let mut pool              = pond::Pool::new(processes)
+    let     size      : usize = arguments.n;
+    let     overhead  : usize = (size+1) % processes;
+
+    //initialise mutex for synchronising maxresiduum between the processes
+    let     maxresiduum_mutex = Arc::new(Mutex::new(0_f64));
+    let     ref_maxresiduum_mutex = &maxresiduum_mutex;
+
+    //initialise array for all Stripes, shape is [ #processes, 2 rows, #width]
+    let mut matrix_stripes = Array::<f64, _>::zeros((processes, 2, arguments.n+1));
+
+
+    let now = Instant::now();
+
+    //first split of the array, initialise of vector of all mutable views
+    let (left , right) = matrix.view_mut().split_at(Axis(1),(size+1)/processes);
+    let mut matrix_blocks = vec![left];
+    //splitting the array in more blocks by splitting the right part again,
+    // {
+
+    //     let mut temp = right;
+    //     for i in 1 .. processes{
+
+    //         let spilt_ix = if i < processes-1 {(size+1)/processes} else{(size+1)/processes + overhead} ;
+    //         let (left , new_right) = temp.split_at(Axis(1),spilt_ix);
+    //         matrix_blocks.push(left);
+    //         temp = new_right // last right block is empty, because the split is on the last row ( + overhead)
+    //     }
+        
+    // } //temp is dropped here
+    let elapsed = now.elapsed();
+    let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000_000.0);
+    println!("{}", sec);
+
+    if options.inf_func == FUNC_FPISIN {
+
+        pih    = PI * h;
+		fpisin = 0.25 * TOW_PI_SQARE * h * h;
+    }
+
+    while term_iteration > 0 {
+        { // block for mutex
+            let mut shared_maxresiduum = (*ref_maxresiduum_mutex).lock().unwrap();
+            *shared_maxresiduum = 0.0;
+            // mutex goes out of scope an will be unlocked
+        }
+        
+        //copy the shared rows between to processes into matrix_stripes, to safely the rows
+        //copy_matrix_stripes(&matrix_blocks, matrix_in, processes, &mut matrix_stripes.view_mut());
+        let ref_matrix_stripes = &matrix_stripes; //bind ownership to immutable reference to accessed the matrix in the parallel block
+        //println!("{}", sec);
+        //let (im_ma , out_ma) = matrix.view_mut().split_at(Axis(0),(size+1)/processes);
+        
+
+
+        let now2 = Instant::now();
+        pool.scoped( |scoped| {
+            for block in matrix_blocks.iter_mut(){
+                scoped.execute(move || {
+                    let elapsed2 = now2.elapsed();
+                    let sec2 = (elapsed2.as_secs() as f64) + (elapsed2.subsec_nanos() as f64 / 1000_000_000.0);
+                    //println!("{}", sec2);
+
+                    let mut maxresiduum : f64 = 0.0;
+                    //set up start and end
+                    //let start = if __thread_id > 0 {0}else{1}; // first process will skip first row
+                    //let end = if __thread_id < processes-1 {((size+1)/processes)}else{((size+1)/processes)+overhead-1}; //last process takes overhead
+
+                    let start = 1;
+                    let end = (size+1)/processes - 1;
+
+                    for i in start .. end{
+
+                        let mut fpisin_i : f64 = 0.0;
+
+                        if options.inf_func == FUNC_FPISIN {
+                            fpisin_i = fpisin * f64::sin(pih * (i as f64));
+                        }
+
+                        for j in 1 .. size{
+                            let mut star =  0.25 *(
+                                if i > 0 { block[[matrix_in, i-1,j]] }
+                                    else{ 0.0 }//ref_matrix_stripes[[__thread_id-1, 1, j]] } // uses the last row of the process -1 (above in the matrix)
+                                + block[[matrix_in, i,j-1]]
+                                + block[[matrix_in, i,j+1]]
+                                + if i < end - 1 { block[[matrix_in, i+1,j]] }
+                                    else{ 0.0 });// ref_matrix_stripes[[__thread_id+1, 0, j]]}) ; // uses the first row of the process + 1 (below in the matrix)
+
+                            if options.inf_func == FUNC_FPISIN {
+                                star += fpisin_i * f64::sin(pih * j as f64);
+                            }
+
+                            if options.termination == TERM_PREC || term_iteration == 1 {
+                                let residuum = (block[[matrix_in,i,j]] - star).abs();
+                                maxresiduum = maxresiduum.max(residuum);
+                            }
+
+                            block[[matrix_out,i,j]] = star;
+                        }
+                    }
+                    let mut shared_maxresiduum = (*ref_maxresiduum_mutex).lock().unwrap();  // lock mutex
+                    *shared_maxresiduum = maxresiduum.max(*shared_maxresiduum);             // write maxresiduum
+                });
+            }
+        });
+
+        let shared_maxresiduum = (*ref_maxresiduum_mutex).lock().unwrap();
+
+        results.stat_iteration += 1;
+        results.stat_precision = *shared_maxresiduum;
+
+        if options.method == METH_JACOBI{
+            mem::swap(&mut matrix_out, &mut matrix_in);
+        }else{
+            panic!{"The Gaus Seidel Algorthm cannot be calculatet like this!"}
+        }
+
+        // check for stopping calculation depending on termination method
+        if options.termination == TERM_PREC {
+            if *shared_maxresiduum < options.term_precision {
+                term_iteration = 0;
+            }
+        }
+        else if options.termination == TERM_ITER {
+            term_iteration -= 1;
+        }
+    }
+    drop(pool);
+    results.m = matrix_in;
+}
+
+fn display(matrix: &Array3<f64>, options: &Options, results: &CalcResults){
+
+        let interlines = options.interlines as usize;
+
+        println!("Matrix:");
+
+        for y  in 0 .. 9
+        {
+                for x in 0..9
+                {
+                        print!("{:.4}", matrix[[results.m , y * (interlines + 1), x * (interlines + 1)]]);
+                }
+
+                print!("\n");
+        }
+}
+
+fn init(matrix: &mut Array3<f64>, options: &Options, arguments: &CalcArguments){
+    if options.inf_func == FUNC_F0 {
+        let n = arguments.n;
+        let h = arguments.h;
+                for g in 0 .. arguments.num_matrices as usize {
+                        for i in 0 .. n as usize {
+                                matrix[[g, i, 0]] = 1.0 - (h * i as f64);
+                                matrix[[g, i, n]] = h * i as f64;
+                                matrix[[g, 0, i]] = 1.0 - (h * i as f64);
+                                matrix[[g, n, i]] = h * i as f64;
+                        }
+
+                        matrix[[g, n, 0]] = 0.0;
+                        matrix[[g, 0, n]] = 0.0;
+                }
+        }
+
+}
+
+fn main() {
+    //Define
+    use std::time::Instant;
+    
+    let options     = Options{
+            number: 1,
+            method: 2 ,
+            interlines: 200,
+            inf_func: 1,
+            termination: 2,
+            term_iteration: 1001,
+            term_precision: 0.0
+            };
+
+    let elements = (options.interlines * 8) + 9 - 1;
+    let arguments  = CalcArguments {
+            n: elements as usize,
+            num_matrices: options.method,
+            h: 1.0 / elements as f64
+    };
+    let mut results     = CalcResults{m: 0,
+        stat_iteration: 0, 
+        stat_precision: 0.0};
+
+    
+    let mut matrix :  Array3<f64> = Array::<f64, _>::zeros((2,arguments.n+1, arguments.n+1));
+
+    init(&mut matrix, &options, &arguments);
+    
+    let now = Instant::now();
+    
+    calc_get_with_threadpool(&options, &mut results, &arguments, &mut matrix);
+    
+    let elapsed = now.elapsed();
+    let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000_000.0);
+    println!("{}", sec);
+}
+

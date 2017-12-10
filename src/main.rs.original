@@ -1,0 +1,127 @@
+#![crate_name = "pde_solver"]
+
+#[macro_use(s)]
+extern crate ndarray;
+extern crate ndarray_parallel;
+//extern crate itertools;
+
+//creates for simpler parallelisation 
+extern crate rayon;
+extern crate crossbeam;
+extern crate scoped_threadpool;
+//extern crate pond;
+
+//importing functions from other modules
+use ndarray::prelude::*;
+
+pub mod calculate; //all calculate functions
+    use calculate::{serial, parallel};
+
+pub mod basis; //all structures & constants, methods for in- and output 
+    use basis::displaymatrix::display_result;
+    use basis::askparams::ask_params;
+    use basis::init_matrix::{init_all, init_all_dim2};
+    use basis::*;
+
+/// This Program calculates the tow dimensional partial differential equations (PDE).
+/// This can be done by using the Gauss-Seidel or Jacobi algorithms
+/// 
+/// The Result will present a simplified view of the matrix an the estimated error of the equations.
+/// 
+/// # (c) Nils C. Meier, Universität Hamburg.
+pub fn main() {
+    //Define
+    use std::time::Instant;
+    
+    let mut options     = Options::default();
+    let mut results     = CalcResults{ ..Default::default()}; 
+    let     arguments   : CalcArguments;
+
+    let mut matrix          : Array3<f64>;
+    let mut result_matrix   : Array2<f64>;
+    
+    //Read
+    //ask_params(&mut options);
+    let elements = (options.interlines * 8) + 9 - 1;
+    arguments = CalcArguments {
+            n: elements as usize,
+            num_matrices: options.method + 1,
+            h: 1.0 / elements as f64
+    };
+    
+    // Only initialize Matrices when they will be used
+    if !( cfg!(feature = "calc_w_iter")) && !( cfg!(feature = "calc_w_zip" )){
+
+        //Initialise
+        let shape = (2,arguments.n+1, arguments.n+1);
+        matrix = Array::<f64, _>::zeros(shape);
+
+        if options.inf_func == FUNC_F0{
+            init_all(&mut matrix.view_mut(), &arguments);
+        }
+
+        //Calculate
+        let now = Instant::now();
+        if options.method == METH_JACOBI && options.number > 1{
+            //parallel::calc_get_with_crossbeam(&options, &mut results, &arguments, &mut  matrix.view_mut()); // crossbeam implantation using JoinHandles to sync
+            parallel::calc_get_with_threadpool(&options, &mut results, &arguments, &mut  matrix.view_mut());  // thread pool implantation using Mutex to sync
+        }else{
+            serial::calc_with_get(&options, &mut results, &arguments, &mut matrix);
+        }
+
+        let elapsed = now.elapsed();
+        let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000_000.0);
+        results.elapsed_time = sec;
+        
+        //Display
+        display_result(&matrix.subview(Axis(0), results.m), &arguments, &results, &options);
+    }else if cfg!(feature = "calc_w_zip"){
+
+        //Initialise
+        result_matrix = Array::<f64, _>::zeros((arguments.n+1, arguments.n+1));
+
+        if options.inf_func == FUNC_F0{
+            init_all_dim2(&mut result_matrix.view_mut(), &arguments);
+        }
+
+        //Calculate
+        let now = Instant::now();
+        if options.method == METH_JACOBI && options.number > 1{
+            parallel::calc_with_zip(&options, &mut results, &arguments, &mut result_matrix.view_mut()); //parallel Zipping
+        }else{
+            serial::calc_with_zip(&options, &mut results, &arguments, &mut result_matrix.view_mut()); //percalcualting fpisin_ij
+        }
+
+        let elapsed = now.elapsed();
+        let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000_000.0);
+        results.elapsed_time = sec;
+       
+        //Display
+        //println!("{:?}", result_matrix); //For Debugging
+        display_result(&result_matrix.view(), &arguments, &results, &options);
+    }else{
+        //Initialise
+        let shape = (2,arguments.n+1, arguments.n+1);
+        matrix = Array::<f64, _>::zeros(shape);
+
+        if options.inf_func == FUNC_F0{
+            init_all(&mut matrix.view_mut(), &arguments);
+        }
+
+        //Calculate
+        let now = Instant::now();
+        if options.method == METH_JACOBI && options.number > 1{
+            parallel::calc_with_iterators(&options, &mut results, &arguments, &mut matrix.view_mut()); //sync with mutex, parallel Zip
+        }else{
+            serial::calc_with_iterators(&options, &mut results, &arguments, &mut matrix.view_mut()); //using iterator to access field to write
+        }
+       
+        let elapsed = now.elapsed();
+        let sec = (elapsed.as_secs() as f64) + (elapsed.subsec_nanos() as f64 / 1000_000_000.0);
+        results.elapsed_time = sec;  
+
+        //Display
+        //println!("{:?}", matrix); //For Debugging
+        display_result(&matrix.subview(Axis(0), results.m), &arguments, &results, &options);
+    }
+}

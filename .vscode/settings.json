@@ -1,0 +1,31 @@
+{
+    "cSpell.enabled": true,
+    "cSpell.enabledLanguageIds": [
+        "c",
+        "rs",
+        "cpp",
+        "csharp",
+        "go",
+        "handlebars",
+        "javascript",
+        "javascriptreact",
+        "json",
+        "latex",
+        "markdown",
+        "php",
+        "plaintext",
+        "python",
+        "restructuredtext",
+        "text",
+        "typescript",
+        "typescriptreact",
+        "yml"
+    ],
+    "spellright.language": "en",
+    "spellright.documentTypes": [
+		"rs"
+        "markdown",
+        "latex",
+        "plaintext"
+    ]
+}
